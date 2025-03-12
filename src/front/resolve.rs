@@ -70,6 +70,7 @@ pub enum ResolveError {
     AlreadyDefined(Span, Ident),
     NotFound(Ident),
     NotIdent(Span),
+    NotAnnotation(Ident),
 }
 
 impl ResolveError {
@@ -84,6 +85,9 @@ impl ResolveError {
             ResolveError::NotIdent(span) => Diagnostic::new(ReportKind::Error, span)
                 .with_message("Expression must be an identifier")
                 .with_label(Label::new(span).with_message("found expression instead")),
+            ResolveError::NotAnnotation(ident) => Diagnostic::new(ReportKind::Error, ident.span)
+                .with_message(format!("Name `{}` is not declared as an annotation", ident))
+                .with_label(Label::new(ident.span).with_message("not an annotation")),
         }
         .with_code(lsp_types::NumberOrString::String("resolve".to_owned()))
     }
@@ -215,15 +219,17 @@ impl<'tcx> VisitorMut for Resolve<'tcx> {
                 self.with_subscope(|this| this.visit_block(block))
             }
             StmtKind::Annotation(_, ref mut ident, ref mut args, ref mut inner_stmt) => {
+                let old_ident = *ident;
                 self.visit_ident(ident)?;
-
                 match self.tcx.get(*ident).as_deref() {
-                    None => {} // Declaration not found
+                    None => {
+                        return Err(ResolveError::NotFound(*ident))?;
+                    } // Declaration not found
                     Some(DeclKind::AnnotationDecl(intrin)) => {
                         let intrin = intrin.clone(); // clone so we can mutably borrow self
                         intrin.resolve(self, s.span, args)?;
                     }
-                    _ => {} // Not an annotation declaration
+                    _ => Err(ResolveError::NotAnnotation(old_ident))?, // Not an annotation declaration
                 }
 
                 self.with_subscope(|this| this.visit_stmt(inner_stmt))
