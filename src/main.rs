@@ -18,6 +18,7 @@ use crate::{
     ast::TyKind,
     driver::mk_z3_ctx,
     front::{resolve::Resolve, tycheck::Tycheck},
+    proof_rules::calculus::get_soundness_map,
     smt::{translate_exprs::TranslateExprs, SmtCtx},
     timing::TimingLayer,
     tyctx::TyCtx,
@@ -846,6 +847,8 @@ fn verify_files_main(
     // based on the provided calculus annotations
     check_calculus_rules(&mut source_units, &mut tcx)?;
 
+    let soundness_map = get_soundness_map(&mut source_units, &mut tcx);
+
     // Desugar encodings from source units. This might generate new source
     // units (for side conditions).
     let mut source_units = apply_encodings(&mut tcx, source_units, server)?;
@@ -872,7 +875,13 @@ fn verify_files_main(
 
     let mut verify_units: Vec<Item<VerifyUnit>> = source_units
         .into_iter()
-        .flat_map(|item| item.flat_map(SourceUnit::into_verify_unit))
+        .flat_map(|item| {
+            let soundness_blame = soundness_map.get(item.name()).cloned().unwrap_or_default();
+            item.flat_map(|unit| {
+                let verify_unit = SourceUnit::into_verify_unit(unit);
+                verify_unit.map(|vu| vu.with_soundness_blame(soundness_blame))
+            })
+        })
         .collect();
 
     if options.debug_options.z3_trace && verify_units.len() > 1 {
@@ -989,8 +998,10 @@ fn verify_files_main(
 
         limits_ref.check_limits()?;
 
+        let soundness_blame = verify_unit.soundness_blame.as_ref().unwrap();
+
         server
-            .handle_vc_check_result(name, &mut result, &mut translate)
+            .handle_vc_check_result(name, &mut result, &mut translate, soundness_blame)
             .map_err(VerifyError::ServerError)?;
     }
 

@@ -62,7 +62,11 @@ pub fn verify_proc(proc: &ProcDecl) -> Option<VerifyUnit> {
         ));
     }
 
-    Some(VerifyUnit { direction, block })
+    Some(VerifyUnit {
+        direction,
+        block,
+        soundness_blame: None,
+    })
 }
 
 /// Turn the direction of this verification unit to lower bounds by adding

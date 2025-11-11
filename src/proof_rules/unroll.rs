@@ -20,12 +20,13 @@ use crate::{
     intrinsic::annotations::{
         check_annotation_call, AnnotationDecl, AnnotationError, Calculus, CalculusType,
     },
+    proof_rules::{infer_fixpoint_semantics_kind, FixpointSemanticsKind},
     tyctx::TyCtx,
 };
 
 use super::{
     util::{encode_unroll, hey_const, intrinsic_param, lit_u128, two_args},
-    Encoding, EncodingEnvironment, GeneratedEncoding,
+    ApproximationKind, Encoding, EncodingEnvironment, GeneratedEncoding,
 };
 
 pub struct UnrollAnnotation(AnnotationDecl);
@@ -90,6 +91,25 @@ impl Encoding for UnrollAnnotation {
         )
     }
 
+    fn get_approximation(
+        &self,
+        fixpoint_semantics: FixpointSemanticsKind,
+        inner_approximation_kind: ApproximationKind,
+    ) -> ApproximationKind {
+        match fixpoint_semantics {
+            FixpointSemanticsKind::LeastFixedPoint => ApproximationKind::Under,
+            FixpointSemanticsKind::GreatestFixedPoint => ApproximationKind::Over,
+        }
+        .infimum(inner_approximation_kind)
+    }
+
+    fn sound_fixpoint_semantics_kind(&self, direction: Direction) -> FixpointSemanticsKind {
+        match direction {
+            Direction::Up => FixpointSemanticsKind::GreatestFixedPoint,
+            Direction::Down => FixpointSemanticsKind::LeastFixedPoint,
+        }
+    }
+
     fn transform(
         &self,
         tcx: &TyCtx,
@@ -101,8 +121,16 @@ impl Encoding for UnrollAnnotation {
 
         let k: u128 = lit_u128(k);
 
+        let fixpoint_semantics =
+            infer_fixpoint_semantics_kind(self, enc_env.calculus, enc_env.direction);
+
+        let direction = match fixpoint_semantics {
+            FixpointSemanticsKind::LeastFixedPoint => Direction::Down,
+            FixpointSemanticsKind::GreatestFixedPoint => Direction::Up,
+        };
+
         // TODO: these should be warning diagnostics emitted to the user
-        match enc_env.direction {
+        match direction {
             Direction::Down => {
                 if !is_top_lit(terminator) {
                     tracing::warn!("Unrolling terminator is not top element (down direction)");

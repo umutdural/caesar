@@ -4,6 +4,8 @@ pub mod calculus;
 
 mod induction;
 pub mod negations;
+use ariadne::ReportKind;
+use calculus::ApproximationKind;
 pub use induction::*;
 mod unroll;
 pub use unroll::*;
@@ -37,6 +39,7 @@ use crate::{
     intrinsic::annotations::{
         AnnotationError, AnnotationKind, AnnotationUnsoundnessError, Calculus,
     },
+    proof_rules::negations::{DirectionError, DirectionTracker},
     tyctx::TyCtx,
 };
 
@@ -63,6 +66,34 @@ pub struct EncodingEnvironment {
     pub stmt_span: Span,
     pub call_span: Span,
     pub direction: Direction,
+    pub calculus: Option<Calculus>,
+}
+
+/// The type of loop semantics used in the encoding annotations
+pub enum FixpointSemanticsKind {
+    LeastFixedPoint,
+    GreatestFixedPoint,
+}
+
+/// Determine the loop semantics type based on the annotation, calculus, and direction
+///  The semantics are determined by the provided calculus if available; otherwise,
+///  they are inferred from the annotation and direction.
+///
+/// The semantics are primarily determined by the calculus type:
+///  - `CalculusType::Wp` and `CalculusType::Ert` use least fixed point semantics,
+///  - `CalculusType::Wlp` uses greatest fixed point semantics.
+///
+/// If no calculus is provided, the semantics are inferred from the annotation's
+/// default (sound) behavior based on the direction.
+pub fn infer_fixpoint_semantics_kind(
+    encoding: &dyn Encoding,
+    calculus: Option<Calculus>,
+    direction: Direction,
+) -> FixpointSemanticsKind {
+    match calculus {
+        Some(calculus) => calculus.calculus_type.to_fixed_point_semantics_kind(),
+        None => encoding.sound_fixpoint_semantics_kind(direction),
+    }
 }
 
 /// The trait that all encoding annotations must implement
@@ -96,6 +127,18 @@ pub trait Encoding: fmt::Debug {
 
     /// Check if the given calculus annotation is compatible with the encoding annotation
     fn is_calculus_allowed(&self, calculus: Calculus, direction: Direction) -> bool;
+
+    /// Select an approximation kind based on the semantics type used.
+    fn get_approximation(
+        &self,
+        fixpoint_semantics: FixpointSemanticsKind,
+        inner_approximation_kind: ApproximationKind,
+    ) -> ApproximationKind;
+
+    /// Get the sound fixpoint semantics kind for this encoding annotation based on the direction
+    ///
+    /// This function is used when there is no calculus annotation present on the procedure
+    fn sound_fixpoint_semantics_kind(&self, direction: Direction) -> FixpointSemanticsKind;
 
     /// Indicates if the encoding annotation is required to be the last statement of a procedure
     fn is_terminator(&self) -> bool;
@@ -136,9 +179,10 @@ pub fn init_encodings(files: &mut Files, tcx: &mut TyCtx) {
 }
 
 /// A struct to keep track of current procedure context when visiting the body of a procedure with a ['VisitorMut'].
+#[derive(Debug, Clone)]
 pub struct ProcContext {
     pub name: Ident,
-    pub direction: Direction,
+    pub direction: DirectionTracker,
     pub calculus: Option<Calculus>,
 }
 /// Walks the AST and transforms encoding annotations into their desugared form.
@@ -168,15 +212,20 @@ impl<'tcx, 'sunit> EncodingVisitor<'tcx, 'sunit> {
 /// UnsoundnessError are thrown when the usage of an annotation is unsound (e.g. mismatched calculus, not a terminator, etc.)
 #[derive(Debug)]
 pub enum EncodingVisitorError {
-    AnnotationError(AnnotationError),
-    UnsoundnessError(AnnotationUnsoundnessError),
+    Annotation(AnnotationError),
+    Unsoundness(AnnotationUnsoundnessError),
+    Direction(DirectionError),
 }
 
 impl EncodingVisitorError {
     pub fn diagnostic(self) -> Diagnostic {
         match self {
-            EncodingVisitorError::AnnotationError(err) => err.diagnostic(),
-            EncodingVisitorError::UnsoundnessError(err) => err.diagnostic(),
+            EncodingVisitorError::Annotation(err) => err.diagnostic(),
+            EncodingVisitorError::Unsoundness(err) => err.diagnostic(),
+            EncodingVisitorError::Direction(err) => {
+                Diagnostic::new(ReportKind::Error, err.negation_span)
+                    .with_message("Unsupported Negation")
+            }
         }
     }
 }
@@ -188,33 +237,13 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
         let proc_ref = proc_ref.clone(); // lose the reference to &mut self
         let proc = proc_ref.borrow();
 
-        let mut curr_calculus: Option<Calculus> = None;
-        // If the procedure has a calculus annotation, store it as the current calculus
-        if let Some(ident) = proc.calculus.as_ref() {
-            match self.tcx.get(*ident) {
-                Some(decl) => {
-                    if let DeclKind::AnnotationDecl(AnnotationKind::Calculus(calculus)) =
-                        decl.as_ref()
-                    {
-                        curr_calculus = Some(*calculus);
-                    }
-                }
-                None => {
-                    // If there isn't any calculus declaration that matches the annotation, throw an error
-                    return Err(EncodingVisitorError::AnnotationError(
-                        AnnotationError::UnknownAnnotation {
-                            span: proc.span,
-                            annotation_name: *ident,
-                        },
-                    ));
-                }
-            }
-        }
+        let curr_calculus =
+            get_calculus(&proc, self.tcx).map_err(EncodingVisitorError::Annotation)?;
 
         // Store the current procedure context
         self.proc_context = Some(ProcContext {
             name: proc.name,
-            direction: proc.direction,
+            direction: DirectionTracker::new(proc.direction),
             calculus: curr_calculus,
         });
 
@@ -246,22 +275,23 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
                         .proc_context
                         .as_ref()
                         // If there is no procedure context, throw an error
-                        .ok_or(EncodingVisitorError::AnnotationError(
+                        .ok_or(EncodingVisitorError::Annotation(
                             AnnotationError::NotInProcedure {
                                 span: s.span,
                                 annotation_name: *ident,
                             },
                         ))?;
 
-                    // Unpack the current procedure context
                     let direction = proc_context.direction;
+
+                    // Unpack the current procedure context
                     let base_proc_ident = proc_context.name;
                     let annotation_span = *annotation_span;
 
                     // Check whether the calculus annotation is actually on a while loop (annotations can only be on while loops)
                     if let StmtKind::While(_, _) = inner_stmt.node {
                     } else {
-                        return Err(EncodingVisitorError::AnnotationError(
+                        return Err(EncodingVisitorError::Annotation(
                             AnnotationError::NotOnWhile {
                                 span: annotation_span,
                                 annotation_name: *ident,
@@ -272,7 +302,7 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
 
                     // A terminator annotation can't be nested in a block
                     if anno_ref.is_terminator() && self.nesting_level > 0 {
-                        return Err(EncodingVisitorError::UnsoundnessError(
+                        return Err(EncodingVisitorError::Unsoundness(
                             AnnotationUnsoundnessError::NotTerminator {
                                 span: s.span,
                                 enc_name: anno_ref.name(),
@@ -284,13 +314,14 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
                         base_proc_ident,
                         stmt_span: s.span,
                         call_span: annotation_span, // TODO: if I change this to stmt_span, explain core vc works :(
-                        direction,
+                        direction: *direction,
+                        calculus: proc_context.calculus,
                     };
 
                     // Generate new statements (and declarations) from the annotated loop
                     let mut enc_gen = anno_ref
                         .transform(self.tcx, inputs, inner_stmt, enc_env)
-                        .map_err(EncodingVisitorError::AnnotationError)?;
+                        .map_err(EncodingVisitorError::Annotation)?;
 
                     // Visit generated statements
                     self.visit_block(&mut enc_gen.block)?;
@@ -334,7 +365,7 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
             | StmtKind::Demonic(_, _)
             | StmtKind::Seq(_) => {
                 if let Some(anno_name) = self.terminator_annotation {
-                    return Err(EncodingVisitorError::UnsoundnessError(
+                    return Err(EncodingVisitorError::Unsoundness(
                         AnnotationUnsoundnessError::NotTerminator {
                             span: s.span,
                             enc_name: anno_name,
@@ -346,10 +377,18 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
                     self.nesting_level -= 1;
                 }
             }
+            StmtKind::Negate(_) => {
+                if let Some(context) = self.proc_context.as_mut() {
+                    context
+                        .direction
+                        .handle_negation_forwards(s)
+                        .map_err(EncodingVisitorError::Direction)?;
+                }
+            }
             _ => {
                 // If there was a terminator annotation before, don't allow further statements
                 if let Some(anno_name) = self.terminator_annotation {
-                    return Err(EncodingVisitorError::UnsoundnessError(
+                    return Err(EncodingVisitorError::Unsoundness(
                         AnnotationUnsoundnessError::NotTerminator {
                             span: s.span,
                             enc_name: anno_name,
@@ -362,4 +401,29 @@ impl<'tcx, 'sunit> VisitorMut for EncodingVisitor<'tcx, 'sunit> {
         }
         Ok(())
     }
+}
+
+/// Get the calculus from a procedure declaration if it exists
+/// Returns an error if the annotation is not valid
+pub fn get_calculus(proc: &ProcDecl, tcx: &TyCtx) -> Result<Option<Calculus>, AnnotationError> {
+    // If the procedure has a calculus annotation, try to extract it
+    if let Some(ident) = proc.calculus.as_ref() {
+        match tcx.get(*ident) {
+            Some(decl) => {
+                // If the declaration is a calculus annotation, return it
+                if let DeclKind::AnnotationDecl(AnnotationKind::Calculus(calculus)) = decl.as_ref()
+                {
+                    return Ok(Some(*calculus));
+                }
+            }
+            None => {
+                // If there isn't any calculus declaration that matches the annotation, throw an error
+                return Err(AnnotationError::UnknownAnnotation {
+                    span: proc.span,
+                    annotation_name: *ident,
+                });
+            }
+        }
+    }
+    Ok(None)
 }

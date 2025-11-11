@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use crate::{
     ast::{Diagnostic, FileId, Files, SourceFilePath, Span, StoredFile},
     driver::{SmtVcCheckResult, SourceUnitName},
+    proof_rules::calculus::SoundnessBlame,
     smt::translate_exprs::TranslateExprs,
     vc::explain::VcExplanation,
     version::caesar_semver_version,
@@ -367,8 +368,9 @@ impl Server for LspServer {
         name: &SourceUnitName,
         result: &mut SmtVcCheckResult<'ctx>,
         translate: &mut TranslateExprs<'smt, 'ctx>,
+        soundness_blame: &SoundnessBlame,
     ) -> Result<(), ServerError> {
-        result.emit_diagnostics(name.span(), self, translate)?;
+        result.emit_diagnostics(name.span(), self, translate, soundness_blame)?;
         self.statuses
             .update_status(name, VerifyStatus::from_prove_result(&result.prove_result));
         self.publish_verify_statuses()?;

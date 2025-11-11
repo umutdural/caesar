@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::{
     ast::{Diagnostic, FileId, Files, StoredFile},
     driver::{SmtVcCheckResult, SourceUnitName},
+    proof_rules::calculus::SoundnessBlame,
     smt::translate_exprs::TranslateExprs,
     vc::explain::VcExplanation,
     VerifyCommand, VerifyError,
@@ -70,6 +71,7 @@ impl Server for TestServer {
         name: &SourceUnitName,
         result: &mut SmtVcCheckResult<'ctx>,
         _translate: &mut TranslateExprs<'smt, 'ctx>,
+        _soundness_blame: &SoundnessBlame,
     ) -> Result<(), ServerError> {
         self.statuses
             .update_status(name, VerifyStatus::from_prove_result(&result.prove_result));

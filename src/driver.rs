@@ -31,6 +31,10 @@ use crate::{
         proc_verify::{to_direction_lower_bounds, verify_proc},
         SpecCall,
     },
+    proof_rules::calculus::{
+        infimum_approximation_list, soundness_blame_of_proc, soundness_blame_of_raw,
+        ApproximationKind, Soundness, SoundnessBlame,
+    },
     resource_limits::{LimitError, LimitsRef},
     servers::Server,
     slicing::{
@@ -400,7 +404,18 @@ impl SourceUnit {
             SourceUnit::Raw(block) => Some(VerifyUnit {
                 direction: Direction::Down,
                 block,
+                soundness_blame: None,
             }),
+        }
+    }
+
+    pub fn extract_soundness_blame(&self, tcx: &mut TyCtx) -> Option<SoundnessBlame> {
+        match self {
+            SourceUnit::Decl(decl) => match decl {
+                DeclKind::ProcDecl(proc_decl) => soundness_blame_of_proc(&proc_decl.borrow(), tcx),
+                _ => None,
+            },
+            SourceUnit::Raw(ref block) => Some(soundness_blame_of_raw(block, tcx)),
         }
     }
 }
@@ -425,6 +440,7 @@ impl fmt::Display for SourceUnit {
 pub struct VerifyUnit {
     pub direction: Direction,
     pub block: Block,
+    pub soundness_blame: Option<SoundnessBlame>,
 }
 
 impl VerifyUnit {
@@ -436,6 +452,11 @@ impl VerifyUnit {
         let res = spec_call.visit_block(&mut self.block);
 
         Ok(res.map_err(|ann_err| ann_err.diagnostic())?)
+    }
+
+    pub fn with_soundness_blame(mut self, soundness_blame: SoundnessBlame) -> VerifyUnit {
+        self.soundness_blame = Some(soundness_blame);
+        self
     }
 
     /// Prepare the code for slicing.
@@ -925,6 +946,7 @@ impl<'ctx> SmtVcCheckResult<'ctx> {
         span: Span,
         server: &mut dyn Server,
         translate: &mut TranslateExprs<'smt, 'ctx>,
+        soundness_blame: &SoundnessBlame,
     ) -> Result<(), VerifyError> {
         // TODO: batch all those messages
 
@@ -934,8 +956,100 @@ impl<'ctx> SmtVcCheckResult<'ctx> {
             }
         }
 
+        let approximation_labels = soundness_blame
+            .approximations
+            .iter()
+            .map(|approx| {
+                let mut label = Label::new(approx.span).with_message(format!(
+                    "This statement is an {} of the real program behavior",
+                    approx.kind
+                ));
+
+                if let Some(calculus) = soundness_blame.calculus {
+                    let statement_str = match approx.is_loop {
+                        true => "loop",
+                        false => "statement",
+                    };
+
+                    match &approx.kind {
+                        ApproximationKind::Over => {
+                            label = label.with_message(format!(
+                                "For this {} S, {} is over-approximated i.e., vc[S] ≥ {}[S]",
+                                statement_str, calculus, calculus
+                            ))
+                        }
+                        ApproximationKind::Under => {
+                            label = label.with_message(format!(
+                                "For this {} S, {} is under-approximated i.e., vc[S] ≤ {}[S]",
+                                statement_str, calculus, calculus
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                label
+            })
+            .collect_vec();
+
+        let overall_approx = infimum_approximation_list(&soundness_blame.approximations);
+
+        let is_both_over_and_under = soundness_blame
+            .approximations
+            .iter()
+            .any(|approx| approx.kind == ApproximationKind::Over)
+            && soundness_blame
+                .approximations
+                .iter()
+                .any(|approx| approx.kind == ApproximationKind::Under);
+
+        let approx_note: Option<String> = if let Some(calculus) = soundness_blame.calculus {
+            match overall_approx {
+                ApproximationKind::Over => Some(format!(
+                    "The {} of the program is over-approximated, i.e., vc[program] ≥ {}[program]",
+                    calculus, calculus
+                )),
+                ApproximationKind::Under => Some(format!(
+                    "The {} of the program is under-approximated, i.e., vc[program] ≤ {}[program]",
+                    calculus, calculus
+                )),
+                ApproximationKind::Unknown => {
+                    if is_both_over_and_under {
+                        Some(format!(
+                            "The {} of the program is both over- and under-approximated in different parts of the program, 
+                            therefore the approximation relationship for the whole program is unknown.",
+                            calculus,
+                        ))
+                    } else {
+                        Some(format!(
+                            "The approximation relationship of the vc and the {} of the program is unknown.",
+                            calculus,
+                        ))
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         match &mut self.prove_result {
-            ProveResult::Proof => {}
+            ProveResult::Proof => {
+                if matches!(
+                    soundness_blame.soundness,
+                    Soundness::Refutation | Soundness::Unknown
+                ) {
+                    let mut diag = Diagnostic::new(ReportKind::Warning, span)
+                        .with_message("The verification result might be unsound.")
+                        .with_labels(approximation_labels);
+
+                    if let Some(approx_note) = approx_note {
+                        diag = diag.with_note(approx_note);
+                    }
+
+                    server.add_diagnostic(diag)?;
+                }
+            }
+
             ProveResult::Counterexample => {
                 let model = self.model.as_ref().unwrap();
                 let mut labels = vec![];
@@ -985,6 +1099,17 @@ impl<'ctx> SmtVcCheckResult<'ctx> {
                 let diagnostic = Diagnostic::new(ReportKind::Error, span)
                     .with_message(text)
                     .with_labels(labels);
+
+                let diagnostic = match soundness_blame.soundness {
+                    Soundness::Proof | Soundness::Unknown => {
+                        // This counter-example might be spurious, add a diagnostic
+                        diagnostic
+                            .with_note("This counter-example might be spurious and might not apply to the real program.")
+                            .with_labels(approximation_labels)
+                    }
+                    Soundness::Refutation | Soundness::Exact => diagnostic,
+                };
+
                 server.add_diagnostic(diagnostic)?;
             }
             ProveResult::Unknown(reason) => {

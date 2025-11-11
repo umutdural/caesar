@@ -212,6 +212,7 @@ pub fn explain_decl_vc(
     if let DeclKind::ProcDecl(decl_ref) = decl_kind {
         let proc = decl_ref.borrow();
         let body = proc.body.borrow();
+
         if let Some(ref body) = *body {
             let post = fold_spec(&proc, proc.ensures());
             let res = explain_raw_vc(tcx, body, post, proc.direction, limits_ref)?;
@@ -272,7 +273,9 @@ fn explain_unroll(
         stmt_span,
         call_span,
         direction,
+        calculus: None,
     };
+
     let unrolled_stmts = encode_unroll(
         &enc_env,
         loop_stmt,

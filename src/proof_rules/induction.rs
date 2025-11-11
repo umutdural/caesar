@@ -21,13 +21,14 @@ use crate::{
     intrinsic::annotations::{
         check_annotation_call, AnnotationDecl, AnnotationError, Calculus, CalculusType,
     },
+    proof_rules::{infer_fixpoint_semantics_kind, FixpointSemanticsKind},
     slicing::{wrap_with_error_message, wrap_with_success_message},
     tyctx::TyCtx,
 };
 
 use super::{
     util::{encode_extend, encode_iter, intrinsic_param, lit_u128, one_arg, two_args},
-    Encoding, EncodingEnvironment, GeneratedEncoding,
+    ApproximationKind, Encoding, EncodingEnvironment, GeneratedEncoding,
 };
 
 /// The "@induction" encoding is just syntactic sugar for 1-induction.
@@ -93,6 +94,25 @@ impl Encoding for InvariantAnnotation {
         )
     }
 
+    fn get_approximation(
+        &self,
+        fixpoint_semantics: FixpointSemanticsKind,
+        inner_approximation_kind: ApproximationKind,
+    ) -> ApproximationKind {
+        match fixpoint_semantics {
+            FixpointSemanticsKind::LeastFixedPoint => ApproximationKind::Over,
+            FixpointSemanticsKind::GreatestFixedPoint => ApproximationKind::Under,
+        }
+        .infimum(inner_approximation_kind)
+    }
+
+    fn sound_fixpoint_semantics_kind(&self, direction: Direction) -> FixpointSemanticsKind {
+        match direction {
+            Direction::Up => FixpointSemanticsKind::LeastFixedPoint,
+            Direction::Down => FixpointSemanticsKind::GreatestFixedPoint,
+        }
+    }
+
     fn transform(
         &self,
         tcx: &TyCtx,
@@ -102,7 +122,7 @@ impl Encoding for InvariantAnnotation {
     ) -> Result<GeneratedEncoding, AnnotationError> {
         let [invariant] = one_arg(args);
         let k = 1;
-        transform_k_induction(tcx, inner_stmt, enc_env, k, invariant)
+        transform_k_induction(tcx, inner_stmt, enc_env, k, invariant, self)
     }
 
     fn is_terminator(&self) -> bool {
@@ -177,6 +197,25 @@ impl Encoding for KIndAnnotation {
         )
     }
 
+    fn get_approximation(
+        &self,
+        fixpoint_semantics: FixpointSemanticsKind,
+        inner_approximation_kind: ApproximationKind,
+    ) -> ApproximationKind {
+        match fixpoint_semantics {
+            FixpointSemanticsKind::LeastFixedPoint => ApproximationKind::Over,
+            FixpointSemanticsKind::GreatestFixedPoint => ApproximationKind::Under,
+        }
+        .infimum(inner_approximation_kind)
+    }
+
+    fn sound_fixpoint_semantics_kind(&self, direction: Direction) -> FixpointSemanticsKind {
+        match direction {
+            Direction::Up => FixpointSemanticsKind::LeastFixedPoint,
+            Direction::Down => FixpointSemanticsKind::GreatestFixedPoint,
+        }
+    }
+
     fn transform(
         &self,
         tcx: &TyCtx,
@@ -195,7 +234,7 @@ impl Encoding for KIndAnnotation {
             });
         }
 
-        transform_k_induction(tcx, inner_stmt, enc_env, k_val, invariant)
+        transform_k_induction(tcx, inner_stmt, enc_env, k_val, invariant, self)
     }
 
     fn is_terminator(&self) -> bool {
@@ -215,9 +254,19 @@ fn transform_k_induction(
     enc_env: EncodingEnvironment,
     k: u128,
     invariant: &Expr,
+    annotation: &dyn Encoding,
 ) -> Result<GeneratedEncoding, AnnotationError> {
     let annotation_span = enc_env.call_span;
-    let direction = enc_env.direction;
+
+    let fixpoint_semantics =
+        infer_fixpoint_semantics_kind(annotation, enc_env.calculus, enc_env.direction);
+
+    let direction = {
+        match fixpoint_semantics {
+            FixpointSemanticsKind::LeastFixedPoint => Direction::Up,
+            FixpointSemanticsKind::GreatestFixedPoint => Direction::Down,
+        }
+    };
 
     let mut visitor = ModifiedVariableCollector::new();
     visitor.visit_stmt(&mut inner_stmt.clone()).unwrap();

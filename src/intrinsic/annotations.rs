@@ -12,8 +12,7 @@ use crate::{
         resolve::{Resolve, ResolveError},
         tycheck::{Tycheck, TycheckError},
     },
-    proof_rules::calculus::RecursiveProcBlame,
-    proof_rules::Encoding,
+    proof_rules::{calculus::RecursiveProcBlame, Encoding, FixpointSemanticsKind},
     slicing::selection::SliceAnnotation,
     tyctx::TyCtx,
 };
@@ -117,55 +116,55 @@ impl AnnotationUnsoundnessError {
     pub fn diagnostic(self) -> Diagnostic {
         match self {
             AnnotationUnsoundnessError::NotTerminator{span, enc_name} => {
-                Diagnostic::new(ReportKind::Error, span)
-                    .with_message(format!(
-                        "The '{}' annotation must annotate the last statement of the program.",
-                        enc_name.name
-                    ))
-                    .with_label(Label::new(span).with_message(
-                        "There must not be any statements after this annotated statement (and the annotated statement must not be nested in a block).",
-                    ))
-            }
+                        Diagnostic::new(ReportKind::Error, span)
+                            .with_message(format!(
+                                "The '{}' annotation must annotate the last statement of the program.",
+                                enc_name.name
+                            ))
+                            .with_label(Label::new(span).with_message(
+                                "There must not be any statements after this annotated statement (and the annotated statement must not be nested in a block).",
+                            ))
+                    }
             AnnotationUnsoundnessError::CalculusEncodingMismatch{direction, span, calculus_name, enc_name } => {
-                Diagnostic::new(ReportKind::Error, span)
-                    .with_message(format!(
-                        "In {}s, the '{}' calculus does not support the '{}' encoding.",
-                        direction.prefix("proc"), calculus_name.name, enc_name.name
-                    ))
-                    .with_label(Label::new(span).with_message(
-                        "The calculus, proof rule, and direction are incompatible.",
-                    ))
-            }
+                        Diagnostic::new(ReportKind::Error, span)
+                            .with_message(format!(
+                                "In {}s, the '{}' calculus does not support the '{}' encoding.",
+                                direction.prefix("proc"), calculus_name.name, enc_name.name
+                            ))
+                            .with_label(Label::new(span).with_message(
+                                "The calculus, proof rule, and direction are incompatible.",
+                            ))
+                    }
             AnnotationUnsoundnessError::CalculusCallMismatch{span,context_calculus,call_calculus} => {
-                Diagnostic::new(ReportKind::Error, span)
-                    .with_message(format!(
-                        "Cannot call '{}' proc from '{}' proc.",
-                         call_calculus.name, context_calculus.name
-                    ))
-                    .with_label(Label::new(span).with_message(
-                        "The calculus of the called procedure must match the calculus of the calling procedure.",
-                    ))
-            }
+                        Diagnostic::new(ReportKind::Error, span)
+                            .with_message(format!(
+                                "Cannot call '{}' proc from '{}' proc.",
+                                 call_calculus.name, context_calculus.name
+                            ))
+                            .with_label(Label::new(span).with_message(
+                                "The calculus of the called procedure must match the calculus of the calling procedure.",
+                            ))
+                    }
             AnnotationUnsoundnessError::UnsoundRecursion{direction,calculus_name , blame } => {
-                Diagnostic::new(ReportKind::Error, blame.call_span)
-                    .with_message(format!(
-                        "Potentially recursive calls are not allowed in a {} with the '{}' calculus.",
-                        direction.prefix("proc"), calculus_name.name, 
-                    ))
-                    .with_label(Label::new(blame.call_span).with_message({
-                        if blame.called_proc_name == blame.recursive_proc_name {
-                            format!("This call to '{}' is potentially recursive.", blame.called_proc_name.name)
-                        } else {
-                            format!(
-                            "This call to '{}' can lead to a recursive call to '{}' again.", 
-                            blame.called_proc_name.name, blame.recursive_proc_name.name
+                        Diagnostic::new(ReportKind::Error, blame.call_span)
+                            .with_message(format!(
+                                "Potentially recursive calls are not allowed in a {} with the '{}' calculus.",
+                                direction.prefix("proc"), calculus_name.name, 
+                            ))
+                            .with_label(Label::new(blame.call_span).with_message({
+                                if blame.called_proc_name == blame.recursive_proc_name {
+                                    format!("This call to '{}' is potentially recursive.", blame.called_proc_name.name)
+                                } else {
+                                    format!(
+                                    "This call to '{}' can lead to a recursive call to '{}' again.", 
+                                    blame.called_proc_name.name, blame.recursive_proc_name.name
+                                    )
+                                }
+                            }))
+                            .with_note(
+                                "(Co)Procedure calls make use of Park induction, which is not sound in this setting in general.",
                             )
-                        }
-                    }))
-                    .with_note(
-                        "(Co)Procedure calls make use of Park induction, which is not sound in this setting in general.",
-                    )
-            }
+                    }
         }
     }
 }
@@ -176,11 +175,27 @@ pub struct Calculus {
     pub calculus_type: CalculusType,
 }
 
+impl std::fmt::Display for Calculus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CalculusType {
     Wp,
     Wlp,
     Ert,
+}
+
+impl std::fmt::Display for CalculusType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CalculusType::Wp => write!(f, "wp"),
+            CalculusType::Wlp => write!(f, "wlp"),
+            CalculusType::Ert => write!(f, "ert"),
+        }
+    }
 }
 
 impl CalculusType {
@@ -191,6 +206,13 @@ impl CalculusType {
                 | (CalculusType::Wp, Direction::Up)
                 | (CalculusType::Ert, Direction::Up)
         )
+    }
+
+    pub fn to_fixed_point_semantics_kind(&self) -> FixpointSemanticsKind {
+        match self {
+            CalculusType::Wp | CalculusType::Ert => FixpointSemanticsKind::LeastFixedPoint,
+            CalculusType::Wlp => FixpointSemanticsKind::GreatestFixedPoint,
+        }
     }
 }
 

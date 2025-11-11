@@ -160,6 +160,7 @@ fn test_omega_transform() {
         "#,
     );
     let source = r#"
+            @wp
             proc main() -> () {
                 var x: UInt
                 @omega_invariant(n,[n > x])

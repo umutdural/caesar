@@ -24,10 +24,11 @@ use crate::{
     intrinsic::annotations::{
         check_annotation_call, AnnotationDecl, AnnotationError, Calculus, CalculusType,
     },
+    proof_rules::FixpointSemanticsKind,
     tyctx::TyCtx,
 };
 
-use super::{Encoding, EncodingEnvironment, GeneratedEncoding, ProcInfo};
+use super::{ApproximationKind, Encoding, EncodingEnvironment, GeneratedEncoding, ProcInfo};
 
 use super::util::*;
 
@@ -87,6 +88,26 @@ impl Encoding for PASTAnnotation {
 
     fn is_calculus_allowed(&self, calculus: Calculus, direction: Direction) -> bool {
         matches!(calculus.calculus_type, CalculusType::Ert) && direction == Direction::Up
+    }
+
+    fn get_approximation(
+        &self,
+        fixpoint_semantics: FixpointSemanticsKind,
+        inner_approximation_kind: ApproximationKind,
+    ) -> ApproximationKind {
+        match (fixpoint_semantics, inner_approximation_kind) {
+            (FixpointSemanticsKind::LeastFixedPoint, ApproximationKind::Exact) => {
+                ApproximationKind::Exact
+            }
+            _ => ApproximationKind::Unknown,
+        }
+    }
+
+    fn sound_fixpoint_semantics_kind(&self, direction: Direction) -> FixpointSemanticsKind {
+        match direction {
+            Direction::Up => FixpointSemanticsKind::LeastFixedPoint,
+            Direction::Down => FixpointSemanticsKind::GreatestFixedPoint,
+        }
     }
 
     fn transform(

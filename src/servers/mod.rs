@@ -7,6 +7,7 @@ use std::{
 use crate::{
     ast::{Diagnostic, FileId, Files, Span, SpanVariant, StoredFile},
     driver::{SmtVcCheckResult, SourceUnitName},
+    proof_rules::calculus::SoundnessBlame,
     smt::translate_exprs::TranslateExprs,
     vc::explain::VcExplanation,
     VerifyError,
@@ -154,6 +155,7 @@ pub trait Server: Send {
         name: &SourceUnitName,
         result: &mut SmtVcCheckResult<'ctx>,
         translate: &mut TranslateExprs<'smt, 'ctx>,
+        soundness_blame: &SoundnessBlame,
     ) -> Result<(), ServerError>;
 
     /// Return an exit code for the process.

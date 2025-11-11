@@ -1,14 +1,11 @@
 use std::{collections::HashMap, ops::DerefMut};
 
 use crate::{
-    ast::{
-        visit::{walk_stmt, VisitorMut},
-        DeclKind, DeclRef, Diagnostic, Expr, ExprKind, Ident, ProcDecl, Stmt, StmtKind,
-    },
+    ast::{visit::VisitorMut, DeclKind, DeclRef, Diagnostic, Expr, ExprKind, Ident, ProcDecl},
     intrinsic::annotations::{
         AnnotationError, AnnotationKind, AnnotationUnsoundnessError, Calculus,
     },
-    proof_rules::ProcContext,
+    proof_rules::{negations::DirectionTracker, ProcContext},
     tyctx::TyCtx,
 };
 
@@ -37,15 +34,15 @@ impl<'tcx> CalculusVisitor<'tcx> {
 /// UnsoundnessError are thrown when the usage of an annotation is unsound (e.g. mismatched calculus )
 #[derive(Debug)]
 pub enum CalculusVisitorError {
-    AnnotationError(AnnotationError),
-    UnsoundnessError(AnnotationUnsoundnessError),
+    Annotation(AnnotationError),
+    Unsoundness(AnnotationUnsoundnessError),
 }
 
 impl CalculusVisitorError {
     pub fn diagnostic(self) -> Diagnostic {
         match self {
-            CalculusVisitorError::AnnotationError(err) => err.diagnostic(),
-            CalculusVisitorError::UnsoundnessError(err) => err.diagnostic(),
+            CalculusVisitorError::Annotation(err) => err.diagnostic(),
+            CalculusVisitorError::Unsoundness(err) => err.diagnostic(),
         }
     }
 }
@@ -64,7 +61,7 @@ impl<'tcx> VisitorMut for CalculusVisitor<'tcx> {
                         if let Some(call_calculus_ident) = proc.calculus {
                             if context_calculus.name != call_calculus_ident {
                                 // Throw mismatched calculus unsoundness error
-                                return Err(CalculusVisitorError::UnsoundnessError(
+                                return Err(CalculusVisitorError::Unsoundness(
                                     AnnotationUnsoundnessError::CalculusCallMismatch {
                                         span: e.span,
                                         context_calculus: context_calculus.name,
@@ -97,7 +94,7 @@ impl<'tcx> VisitorMut for CalculusVisitor<'tcx> {
                 }
                 None => {
                     // If there isn't any calculus declaration that matches the annotation, throw an error
-                    return Err(CalculusVisitorError::AnnotationError(
+                    return Err(CalculusVisitorError::Annotation(
                         AnnotationError::UnknownAnnotation {
                             span: proc.span,
                             annotation_name: *ident,
@@ -113,7 +110,7 @@ impl<'tcx> VisitorMut for CalculusVisitor<'tcx> {
             if !calculus.calculus_type.is_induction_allowed(proc.direction)
                 && self.recursive_procs.contains_key(&proc.name)
             {
-                return Err(CalculusVisitorError::UnsoundnessError(
+                return Err(CalculusVisitorError::Unsoundness(
                     AnnotationUnsoundnessError::UnsoundRecursion {
                         direction: proc.direction,
                         calculus_name: calculus.name,
@@ -126,7 +123,7 @@ impl<'tcx> VisitorMut for CalculusVisitor<'tcx> {
         // Store the current procedure context
         self.proc_context = Some(ProcContext {
             name: proc.name,
-            direction: proc.direction,
+            direction: DirectionTracker::new(proc.direction),
             calculus: curr_calculus,
         });
 
@@ -142,51 +139,5 @@ impl<'tcx> VisitorMut for CalculusVisitor<'tcx> {
         self.proc_context = None;
 
         res
-    }
-
-    fn visit_stmt(&mut self, s: &mut Stmt) -> Result<(), Self::Err> {
-        match &mut s.node {
-            // If the statement is an annotation, transform it
-            StmtKind::Annotation(_, ident, _, inner_stmt) => {
-                // First visit the statement that is annotated and handle inner annotations
-                self.visit_stmt(inner_stmt)?;
-
-                if let DeclKind::AnnotationDecl(AnnotationKind::Encoding(anno_ref)) =
-                    self.tcx.get(*ident).unwrap().as_ref()
-                {
-                    // Try to get the current procedure context
-                    let proc_context = self
-                        .proc_context
-                        .as_ref()
-                        // If there is no procedure context, throw an error
-                        .ok_or(CalculusVisitorError::AnnotationError(
-                            AnnotationError::NotInProcedure {
-                                span: s.span,
-                                annotation_name: *ident,
-                            },
-                        ))?;
-
-                    // Unpack the current procedure context
-                    let direction = proc_context.direction;
-
-                    // Check if the calculus annotation is compatible with the encoding annotation
-                    if let Some(calculus) = proc_context.calculus {
-                        // If calculus is not allowed, return an error
-                        if !anno_ref.is_calculus_allowed(calculus, direction) {
-                            return Err(CalculusVisitorError::UnsoundnessError(
-                                AnnotationUnsoundnessError::CalculusEncodingMismatch {
-                                    direction,
-                                    span: s.span,
-                                    calculus_name: calculus.name,
-                                    enc_name: anno_ref.name(),
-                                },
-                            ));
-                        };
-                    }
-                }
-            }
-            _ => walk_stmt(self, s)?,
-        }
-        Ok(())
     }
 }

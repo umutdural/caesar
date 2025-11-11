@@ -21,12 +21,13 @@ use crate::{
     intrinsic::annotations::{
         check_annotation_call, AnnotationDecl, AnnotationError, Calculus, CalculusType,
     },
+    proof_rules::{infer_fixpoint_semantics_kind, FixpointSemanticsKind},
     tyctx::TyCtx,
 };
 
 use super::{
     util::{encode_iter, hey_const, intrinsic_param, two_args},
-    Encoding, EncodingEnvironment, GeneratedEncoding,
+    ApproximationKind, Encoding, EncodingEnvironment, GeneratedEncoding,
 };
 
 pub struct OmegaInvAnnotation(AnnotationDecl);
@@ -109,6 +110,25 @@ impl Encoding for OmegaInvAnnotation {
         )
     }
 
+    fn get_approximation(
+        &self,
+        fixpoint_semantics: FixpointSemanticsKind,
+        inner_approximation_kind: ApproximationKind,
+    ) -> ApproximationKind {
+        match fixpoint_semantics {
+            FixpointSemanticsKind::LeastFixedPoint => ApproximationKind::Under,
+            FixpointSemanticsKind::GreatestFixedPoint => ApproximationKind::Over,
+        }
+        .infimum(inner_approximation_kind)
+    }
+
+    fn sound_fixpoint_semantics_kind(&self, direction: Direction) -> FixpointSemanticsKind {
+        match direction {
+            Direction::Up => FixpointSemanticsKind::GreatestFixedPoint,
+            Direction::Down => FixpointSemanticsKind::LeastFixedPoint,
+        }
+    }
+
     fn transform(
         &self,
         tcx: &TyCtx,
@@ -118,7 +138,16 @@ impl Encoding for OmegaInvAnnotation {
     ) -> Result<GeneratedEncoding, AnnotationError> {
         // Unpack values from struct
         let annotation_span = enc_env.call_span;
-        let direction = enc_env.direction;
+
+        let fixpoint_semantics =
+            infer_fixpoint_semantics_kind(self, enc_env.calculus, enc_env.direction);
+
+        let direction = {
+            match fixpoint_semantics {
+                FixpointSemanticsKind::LeastFixedPoint => Direction::Down,
+                FixpointSemanticsKind::GreatestFixedPoint => Direction::Up,
+            }
+        };
 
         let [free_var, omega_inv] = two_args(args);
 

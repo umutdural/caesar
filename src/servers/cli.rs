@@ -10,6 +10,7 @@ use ariadne::ReportKind;
 use crate::{
     ast::{Diagnostic, FileId, Files, SourceFilePath, StoredFile},
     driver::{SmtVcCheckResult, SourceUnitName},
+    proof_rules::calculus::SoundnessBlame,
     smt::translate_exprs::TranslateExprs,
     vc::explain::VcExplanation,
     InputOptions, VerifyError,
@@ -99,6 +100,7 @@ impl Server for CliServer {
         name: &SourceUnitName,
         result: &mut SmtVcCheckResult<'ctx>,
         translate: &mut TranslateExprs<'smt, 'ctx>,
+        _soundness_blame: &SoundnessBlame,
     ) -> Result<(), ServerError> {
         result.print_prove_result(self, translate, name);
         Ok(())
